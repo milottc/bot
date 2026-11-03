@@ -1,125 +1,611 @@
 <!DOCTYPE html>
 <html lang="en">
 <!--
-  RACCOON AI — public chat page.
-  Loads a trained GRU from docs/model.json (or IndexedDB) and generates
-  replies in the style of your documents.
+  RACCOON AI — the best chat page.
+  Loads your trained classifier from docs/model.json (or localStorage).
+  Upload images, get classifications, view history.
 
-  Train a model first with train.html.
+  Repo layout:
+    index.html         ← this file
+    train.html         ← training page
+    docs/model.json    ← created by train.html
 -->
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Raccoon AI</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <style>
   :root{
-    --bg:#0b0e13; --panel:#151a22; --border:#232b36;
-    --text:#e6edf3; --muted:#8b98a9; --accent:#5b8cff; --good:#7ee2a8;
+    --bg:#0b0e13;
+    --bg-soft:#0f1420;
+    --panel:#151a22;
+    --panel-2:#10151d;
+    --border:#232b36;
+    --border-bright:#39465a;
+    --text:#e6edf3;
+    --muted:#8b98a9;
+    --muted-2:#5c6a7d;
+    --accent:#5b8cff;
+    --accent-2:#8a5bff;
+    --good:#7ee2a8;
+    --warn:#ffcc66;
+    --bad:#ff8a8a;
+    --shadow-lg:0 20px 60px rgba(0,0,0,.5);
   }
-  *{box-sizing:border-box}
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
   html,body{height:100%}
   body{
-    margin:0; background:radial-gradient(1200px 600px at 50% -10%, #1b2433, #0b0e13 60%);
+    margin:0;
+    background:radial-gradient(1200px 600px at 50% -10%, #1b2433, #0b0e13 60%);
     color:var(--text);
-    font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased;
+    overflow:hidden;
   }
-  .app{height:100dvh; max-width:820px; margin:0 auto; display:flex; flex-direction:column}
 
+  /* ============================================================
+     APP LAYOUT
+     ============================================================ */
+  .app{
+    height:100dvh;
+    max-width:840px;
+    margin:0 auto;
+    display:flex;
+    flex-direction:column;
+    position:relative;
+  }
+
+  /* ============================================================
+     HEADER
+     ============================================================ */
   header{
-    display:flex; align-items:center; gap:10px;
-    padding:14px 16px; border-bottom:1px solid var(--border);
+    flex:0 0 auto;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:14px 18px;
+    border-bottom:1px solid var(--border);
+    background:rgba(11,14,19,.75);
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
+    z-index:10;
   }
   .logo{
-    width:28px; height:28px; border-radius:9px;
+    width:32px; height:32px; border-radius:10px;
     background:linear-gradient(135deg,#3b6bff,#8a5bff);
-    display:grid; place-items:center; font-size:15px; flex:0 0 auto;
+    display:grid; place-items:center; font-size:17px;
+    flex:0 0 auto;
+    box-shadow:0 2px 12px rgba(59,107,255,.35);
   }
-  h1{font-size:15px; margin:0; font-weight:600}
+  h1{
+    font-size:15px; margin:0; font-weight:600;
+    letter-spacing:.15px;
+  }
   .pill{
-    font-size:11px; padding:3px 9px; border-radius:999px;
-    border:1px solid var(--border); color:var(--muted);
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px;
+    font-size:11px;
+    padding:3px 10px;
+    border-radius:999px;
+    border:1px solid var(--border);
+    color:var(--muted);
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    max-width:180px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   }
-  .pill.ok{color:var(--good); border-color:#2c5a41; background:#12251b}
-  .pill.bad{color:#ffb3b3; border-color:#6b2b2b; background:#1e1214}
+  .pill.ok{
+    color:var(--good);
+    border-color:#2c5a41;
+    background:rgba(18,37,27,.6);
+  }
+  .pill.bad{
+    color:#ffb3b3;
+    border-color:#6b2b2b;
+    background:rgba(30,18,20,.6);
+  }
+  .pill.loading{
+    color:var(--warn);
+    border-color:#4a3d1a;
+    background:rgba(30,26,18,.6);
+  }
   .spacer{flex:1}
-  .header-link{
-    color:var(--accent); text-decoration:none; font-size:12px;
-    padding:5px 10px; border-radius:7px; border:1px solid var(--border);
+  .icon-btn{
+    width:34px; height:34px;
+    border-radius:9px;
+    border:1px solid var(--border);
+    background:transparent;
+    color:var(--muted);
+    cursor:pointer;
+    display:grid; place-items:center;
+    font-size:15px;
+    text-decoration:none;
+    transition:all .15s;
   }
-  .header-link:hover{color:var(--text); border-color:#39465a}
+  .icon-btn:hover{color:var(--text); border-color:var(--border-bright); background:rgba(255,255,255,.03)}
+  .icon-btn:active{transform:scale(.95)}
 
+  /* ============================================================
+     BANNER (warnings / info)
+     ============================================================ */
+  .banner{
+    flex:0 0 auto;
+    margin:8px 16px 0;
+    padding:10px 14px;
+    border-radius:10px;
+    background:#1e1a12;
+    border:1px solid #4a3d1a;
+    color:#ffe1a0;
+    font-size:12.5px;
+    line-height:1.55;
+    z-index:5;
+  }
+  .banner.ok{background:rgba(18,37,27,.8); border-color:#2c5a41; color:#9cebbd}
+  .banner.bad{background:rgba(30,18,20,.8); border-color:#6b2b2b; color:#ffb3b3}
+  .banner code{
+    background:rgba(255,255,255,.08);
+    padding:1px 6px;
+    border-radius:4px;
+    font-size:11.5px;
+    font-family:ui-monospace,monospace;
+  }
+  .banner a{color:inherit; text-decoration:underline}
+
+  /* ============================================================
+     CHAT AREA
+     ============================================================ */
   #chat{
-    flex:1; overflow-y:auto; padding:18px 16px 8px;
-    display:flex; flex-direction:column; gap:12px;
+    flex:1 1 auto;
+    overflow-y:auto;
+    overflow-x:hidden;
+    padding:20px 16px 24px;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+    scroll-behavior:smooth;
+    position:relative;
   }
   #chat::-webkit-scrollbar{width:8px}
-  #chat::-webkit-scrollbar-thumb{background:#222b38; border-radius:4px}
-
-  .row{display:flex; gap:10px; align-items:flex-start; animation:pop .2s ease}
-  .row.user{flex-direction:row-reverse}
-  @keyframes pop{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
-
-  .avatar{
-    flex:0 0 auto; width:30px; height:30px; border-radius:50%;
-    display:grid; place-items:center; font-size:10px; font-weight:700;
-    background:#20293a; color:#9fb3d1;
+  #chat::-webkit-scrollbar-track{background:transparent}
+  #chat::-webkit-scrollbar-thumb{
+    background:#222b38;
+    border-radius:4px;
+    border:2px solid transparent;
+    background-clip:padding-box;
   }
-  .row.user .avatar{background:linear-gradient(135deg,#3b6bff,#6a5bff); color:#fff}
 
-  .bubble{
-    max-width:80%; padding:10px 14px; border-radius:14px;
-    background:var(--panel); border:1px solid var(--border);
-    white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13.5px;
+  /* Drag overlay */
+  #chat.dragover::before{
+    content:"Drop image here";
+    position:sticky;
+    top:0;
+    left:0;
+    right:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    height:100%;
+    font-size:18px;
+    color:var(--accent);
+    font-weight:600;
+    background:rgba(11,14,19,.85);
+    border:2px dashed var(--accent);
+    border-radius:16px;
+    margin:0;
+    position:absolute;
+    inset:8px;
+    z-index:20;
+    pointer-events:none;
+  }
+
+  /* ============================================================
+     EMPTY STATE
+     ============================================================ */
+  .empty{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    padding:40px 20px;
+    flex:1;
+    animation:fadeIn .4s ease;
+  }
+  .empty[hidden]{display:none}
+  .empty-emoji{
+    font-size:64px;
+    line-height:1;
+    margin-bottom:8px;
+    animation:float 3s ease-in-out infinite;
+  }
+  @keyframes float{
+    0%, 100% { transform:translateY(0) }
+    50% { transform:translateY(-8px) }
+  }
+  @keyframes fadeIn{
+    from { opacity:0; transform:translateY(8px) }
+    to { opacity:1; transform:none }
+  }
+  .empty h2{
+    font-size:22px;
+    margin:8px 0 6px;
+    font-weight:600;
+    letter-spacing:.2px;
+  }
+  .empty p{
+    color:var(--muted);
+    font-size:14px;
+    max-width:380px;
+    margin:0 0 22px;
     line-height:1.6;
   }
-  .row.user .bubble{
+  .empty-classes{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    justify-content:center;
+    margin-bottom:22px;
+    max-width:500px;
+  }
+  .empty-classes .class-pill{
+    padding:6px 14px;
+    border-radius:999px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    color:var(--text);
+    font-size:13px;
+    font-weight:500;
+    font-family:ui-monospace,monospace;
+    animation:pillIn .3s backwards;
+  }
+  @keyframes pillIn{
+    from { opacity:0; transform:scale(.9) }
+    to { opacity:1; transform:scale(1) }
+  }
+  .empty-classes .more{
+    padding:6px 14px;
+    color:var(--muted);
+    font-size:13px;
+    font-style:italic;
+  }
+  .empty-hints{
+    display:flex;
+    flex-wrap:wrap;
+    gap:16px;
+    justify-content:center;
+    font-size:12px;
+    color:var(--muted-2);
+    max-width:400px;
+  }
+  .empty-hints span{
+    display:flex;
+    align-items:center;
+    gap:5px;
+  }
+
+  /* ============================================================
+     MESSAGE ROWS
+     ============================================================ */
+  .row{
+    display:flex;
+    gap:10px;
+    align-items:flex-start;
+    animation:slideIn .25s cubic-bezier(.2,.9,.3,1);
+  }
+  .row.user{flex-direction:row-reverse}
+  @keyframes slideIn{
+    from { opacity:0; transform:translateY(10px) }
+    to { opacity:1; transform:none }
+  }
+
+  .avatar{
+    flex:0 0 auto;
+    width:32px; height:32px;
+    border-radius:50%;
+    display:grid; place-items:center;
+    font-size:10px;
+    font-weight:700;
+    background:#20293a;
+    color:#9fb3d1;
+    letter-spacing:.3px;
+    user-select:none;
+  }
+  .row.user .avatar{
     background:linear-gradient(135deg,#3b6bff,#6a5bff);
-    border-color:transparent; color:#fff;
-    border-bottom-right-radius:4px;
-    font-family:inherit; font-size:15px;
+    color:#fff;
   }
-  .row.assistant .bubble{border-bottom-left-radius:4px}
-  .bubble.streaming::after{
-    content:"▍"; margin-left:2px; color:var(--accent);
-    animation:blink 1s steps(1) infinite;
-  }
-  @keyframes blink{50%{opacity:0}}
 
-  .banner{
-    margin:0 16px 8px; padding:10px 14px; border-radius:9px;
-    background:#1e1a12; border:1px solid #4a3d1a; color:#ffe1a0;
-    font-size:12.5px; line-height:1.55;
+  .col{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+    max-width:calc(100% - 60px);
+    min-width:0;
   }
-  .banner.ok{background:#12251b; border-color:#2c5a41; color:#9cebbd}
-  .banner.bad{background:#1e1214; border-color:#6b2b2b; color:#ffb3b3}
-  .banner code{background:rgba(255,255,255,.08); padding:1px 5px; border-radius:4px; font-size:11px}
+  .row.user .col{align-items:flex-end}
 
+  /* ============================================================
+     IMAGE BUBBLE (user)
+     ============================================================ */
+  .image-bubble{
+    position:relative;
+    border-radius:14px;
+    overflow:hidden;
+    background:var(--panel);
+    border:1px solid var(--border);
+    cursor:zoom-in;
+    max-width:100%;
+    transition:transform .15s;
+    box-shadow:0 4px 20px rgba(0,0,0,.25);
+  }
+  .image-bubble:hover{transform:scale(1.01)}
+  .image-bubble img{
+    display:block;
+    max-width:100%;
+    max-height:300px;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+  }
+  .image-bubble .filename{
+    position:absolute;
+    bottom:0; left:0; right:0;
+    padding:16px 10px 6px;
+    background:linear-gradient(transparent, rgba(0,0,0,.75));
+    color:#fff;
+    font-size:11px;
+    opacity:0;
+    transition:opacity .15s;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    pointer-events:none;
+  }
+  .image-bubble:hover .filename{opacity:1}
+
+  /* ============================================================
+     ASSISTANT BUBBLE
+     ============================================================ */
+  .bubble{
+    padding:12px 16px;
+    border-radius:14px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-bottom-left-radius:4px;
+    white-space:normal;
+    word-break:break-word;
+    overflow-wrap:anywhere;
+    min-width:200px;
+  }
+
+  /* Thinking dots */
+  .bubble.thinking{
+    padding:16px 20px;
+    min-width:0;
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+  }
+  .thinking-dot{
+    width:6px; height:6px;
+    border-radius:50%;
+    background:var(--muted);
+    animation:dotBounce 1.2s infinite ease-in-out;
+  }
+  .thinking-dot:nth-child(2){animation-delay:.15s}
+  .thinking-dot:nth-child(3){animation-delay:.3s}
+  @keyframes dotBounce{
+    0%, 60%, 100% { transform:translateY(0); opacity:.4 }
+    30% { transform:translateY(-6px); opacity:1 }
+  }
+
+  /* Error bubble */
+  .bubble.error{
+    background:#1e1214;
+    border-color:#6b2b2b;
+    color:#ffb3b3;
+  }
+
+  /* ============================================================
+     RESULT BUBBLE
+     ============================================================ */
+  .result-top{
+    font-size:15px;
+    line-height:1.4;
+    margin-bottom:14px;
+    display:flex;
+    align-items:baseline;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+  .result-top b{
+    font-weight:600;
+    font-size:16px;
+  }
+  .result-top .pct{
+    font-family:ui-monospace,monospace;
+    font-size:13px;
+    font-weight:600;
+    padding:2px 8px;
+    border-radius:6px;
+    margin-left:2px;
+  }
+  .result-top.confident .pct{
+    color:var(--good);
+    background:rgba(126,226,168,.12);
+  }
+  .result-top.unsure .pct{
+    color:var(--warn);
+    background:rgba(255,204,102,.12);
+  }
+
+  .result-bars{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  }
+  .bar-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-size:12px;
+    line-height:1.4;
+  }
+  .bar-row .label{
+    width:90px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    color:var(--muted);
+    flex:0 0 auto;
+  }
+  .bar-row.top .label{
+    color:var(--text);
+    font-weight:600;
+  }
+  .bar-row .track{
+    flex:1;
+    height:10px;
+    background:#0c1017;
+    border-radius:5px;
+    overflow:hidden;
+    min-width:60px;
+  }
+  .bar-row .fill{
+    height:100%;
+    width:0;
+    background:linear-gradient(90deg,#3b6bff,#8a5bff);
+    border-radius:5px;
+    transition:width .55s cubic-bezier(.2,.9,.3,1);
+  }
+  .bar-row.top .fill{
+    background:linear-gradient(90deg,#2c9c62,#7ee2a8);
+  }
+  .bar-row.low-confidence .fill{
+    background:linear-gradient(90deg,#c98a2c,#ffcc66);
+  }
+  .bar-row .val{
+    width:48px;
+    text-align:right;
+    color:var(--muted);
+    font-family:ui-monospace,monospace;
+    font-size:11.5px;
+    flex:0 0 auto;
+  }
+  .bar-row.top .val{color:var(--text)}
+
+  /* ============================================================
+     FOOTER
+     ============================================================ */
   footer{
-    padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    flex:0 0 auto;
+    padding:12px 16px calc(14px + env(safe-area-inset-bottom));
     border-top:1px solid var(--border);
-    display:flex; gap:10px; align-items:flex-end;
+    background:rgba(11,14,19,.85);
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
   }
-  #input{
-    flex:1; resize:none; max-height:160px; padding:11px 14px; border-radius:14px;
-    border:1px solid var(--border); background:#10151d; color:var(--text);
-    font:15px/1.45 inherit; outline:none; transition:border-color .15s;
-  }
-  #input:focus{border-color:#3b6bff}
-  #input::placeholder{color:#5c6a7d}
-  #input:disabled{opacity:.5}
-  #send{
-    flex:0 0 auto; height:44px; width:44px; border-radius:14px; border:none; cursor:pointer;
-    background:linear-gradient(135deg,#3b6bff,#6a5bff); color:#fff; font-size:17px;
-    display:grid; place-items:center; transition:transform .12s, opacity .15s;
-  }
-  #send:hover:not(:disabled){transform:translateY(-1px)}
-  #send:disabled{opacity:.4; cursor:not-allowed}
 
-  .hidden{display:none !important}
+  #fileInput{display:none}
+
+  .upload-btn{
+    width:100%;
+    padding:15px 20px;
+    border-radius:14px;
+    border:none;
+    background:linear-gradient(135deg,#3b6bff,#6a5bff);
+    color:#fff;
+    font-size:15px;
+    font-weight:600;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:10px;
+    box-shadow:0 4px 20px rgba(59,107,255,.35);
+    transition:transform .12s, box-shadow .12s, opacity .12s;
+    font-family:inherit;
+    position:relative;
+    overflow:hidden;
+  }
+  .upload-btn:hover:not(:disabled){
+    transform:translateY(-1px);
+    box-shadow:0 6px 24px rgba(59,107,255,.45);
+  }
+  .upload-btn:active:not(:disabled){transform:translateY(0)}
+  .upload-btn:disabled{
+    opacity:.35;
+    cursor:not-allowed;
+    box-shadow:none;
+  }
+  .upload-btn svg{flex:0 0 auto}
+  .upload-btn .hint{
+    font-size:12px;
+    font-weight:400;
+    opacity:.7;
+    margin-left:4px;
+  }
+  @media (max-width:480px){
+    .upload-btn .hint{display:none}
+  }
+
+  /* ============================================================
+     LIGHTBOX
+     ============================================================ */
+  .lightbox{
+    position:fixed;
+    inset:0;
+    background:rgba(5,8,12,.92);
+    backdrop-filter:blur(8px);
+    -webkit-backdrop-filter:blur(8px);
+    display:grid;
+    place-items:center;
+    z-index:100;
+    padding:24px;
+    cursor:zoom-out;
+    animation:fadeIn .15s;
+  }
+  .lightbox[hidden]{display:none}
+  .lightbox img{
+    max-width:100%;
+    max-height:100%;
+    border-radius:12px;
+    box-shadow:var(--shadow-lg);
+    animation:zoomIn .2s cubic-bezier(.2,.9,.3,1);
+  }
+  @keyframes zoomIn{
+    from { opacity:0; transform:scale(.95) }
+    to { opacity:1; transform:scale(1) }
+  }
+  .lightbox-close{
+    position:absolute;
+    top:16px; right:16px;
+    width:40px; height:40px;
+    border-radius:50%;
+    border:none;
+    background:rgba(255,255,255,.1);
+    color:#fff;
+    font-size:20px;
+    cursor:pointer;
+    display:grid; place-items:center;
+    transition:background .15s;
+  }
+  .lightbox-close:hover{background:rgba(255,255,255,.2)}
+
+  /* ============================================================
+     RESPONSIVE
+     ============================================================ */
+  @media (max-width:600px){
+    header{padding:12px 14px; gap:8px}
+    h1{font-size:14px}
+    .pill{max-width:120px; font-size:10.5px}
+    #chat{padding:16px 12px 20px; gap:12px}
+    .avatar{width:28px; height:28px; font-size:9px}
+    .image-bubble img{max-height:220px}
+    .bar-row .label{width:70px}
+    .bar-row .val{width:42px}
+    footer{padding:10px 12px calc(12px + env(safe-area-inset-bottom))}
+  }
 </style>
 </head>
 <body>
@@ -128,320 +614,585 @@
   <header>
     <div class="logo">🦝</div>
     <h1>Raccoon AI</h1>
-    <span class="pill" id="status">Loading…</span>
+    <span class="pill loading" id="status">Loading model…</span>
     <div class="spacer"></div>
-    <a class="header-link" href="train.html">Train model</a>
+    <button class="icon-btn" id="clearBtn" title="Clear chat" aria-label="Clear chat">🗑</button>
+    <a class="icon-btn" href="train.html" title="Train a new model" aria-label="Train model">⚙</a>
   </header>
 
-  <div class="banner" id="banner">
-    Loading a trained neural network…
-  </div>
+  <div class="banner" id="banner" hidden></div>
 
-  <main id="chat"></main>
+  <main id="chat" role="log" aria-live="polite">
+    <div class="empty" id="emptyState">
+      <div class="empty-emoji">🦝</div>
+      <h2>Ready when you are</h2>
+      <p>I'm a neural network trained to recognize images. Upload a photo and I'll tell you what I think it is.</p>
+      <div class="empty-classes" id="emptyClasses"></div>
+      <div class="empty-hints">
+        <span>📎 Drag &amp; drop</span>
+        <span>📋 Ctrl+V to paste</span>
+        <span>🖱️ Click upload</span>
+      </div>
+    </div>
+  </main>
 
   <footer>
-    <textarea id="input" rows="1" placeholder="Type something…" disabled></textarea>
-    <button id="send" disabled>➤</button>
+    <input type="file" id="fileInput" accept="image/*" multiple />
+    <button class="upload-btn" id="uploadBtn" disabled aria-label="Upload image">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+      </svg>
+      <span>Upload image</span>
+      <span class="hint">or drop / paste</span>
+    </button>
   </footer>
+</div>
+
+<div class="lightbox" id="lightbox" hidden>
+  <img id="lightboxImg" alt="Enlarged view" />
+  <button class="lightbox-close" id="lightboxClose" aria-label="Close">×</button>
 </div>
 
 <script>
 /* =========================================================
-   Shared constants — must match train.html
+   CONSTANTS
    ========================================================= */
-const SEQ_LEN = 30;
-const EMBED_DIM = 24;
-const GRU_UNITS = 96;
-
+const IMG_SIZE = 48;
 const MODEL_URL = 'docs/model.json';
-const MODEL_FORMAT = 'raccoon-gru-v1';
-const IDB_KEY = 'indexeddb://raccoon-brain-gru';
+const MODEL_FORMAT = 'raccoon-classifier-v1';
+const STORAGE_KEY = 'rc_classifier';
+const MAX_DISPLAY_SIZE = 800;
 
 /* =========================================================
    DOM
    ========================================================= */
 const chatEl = document.getElementById('chat');
-const inputEl = document.getElementById('input');
-const sendBtn = document.getElementById('send');
+const emptyEl = document.getElementById('emptyState');
+const emptyClassesEl = document.getElementById('emptyClasses');
 const statusEl = document.getElementById('status');
 const bannerEl = document.getElementById('banner');
+const fileInput = document.getElementById('fileInput');
+const uploadBtn = document.getElementById('uploadBtn');
+const clearBtn = document.getElementById('clearBtn');
+const lightboxEl = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightboxImg');
+const lightboxClose = document.getElementById('lightboxClose');
 
 /* =========================================================
-   State
+   STATE
    ========================================================= */
 let model = null;
-let charToIdx = new Map();
-let idxToChar = [];
-let vocabSize = 0;
+let classNames = [];
 let ready = false;
 let busy = false;
-let greetingShown = false;
+let messageCount = 0;
 
 /* =========================================================
-   UI
+   UI HELPERS
    ========================================================= */
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function scrollDown(){ chatEl.scrollTop = chatEl.scrollHeight; }
-
-function autoGrow(){
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
-}
-
-function addBubble(role, text = ''){
-  const row = document.createElement('div');
-  row.className = 'row ' + role;
-  const av = document.createElement('div');
-  av.className = 'avatar';
-  av.textContent = role === 'user' ? 'YOU' : 'R';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text;
-  row.append(av, bubble);
-  chatEl.append(row);
-  scrollDown();
-  return bubble;
-}
-
-function setStatus(text, kind){
+function setStatus(text, kind) {
   statusEl.textContent = text;
-  statusEl.classList.remove('ok','bad');
-  if (kind === 'ok') statusEl.classList.add('ok');
-  if (kind === 'bad') statusEl.classList.add('bad');
+  statusEl.className = 'pill' + (kind ? ' ' + kind : '');
 }
 
-function setBanner(html, kind){
+function setBanner(html, kind) {
+  if (!html) {
+    bannerEl.hidden = true;
+    return;
+  }
   bannerEl.innerHTML = html;
-  bannerEl.classList.remove('ok','bad');
-  if (kind === 'ok') bannerEl.classList.add('ok');
-  if (kind === 'bad') bannerEl.classList.add('bad');
+  bannerEl.className = 'banner' + (kind ? ' ' + kind : '');
+  bannerEl.hidden = false;
+}
+
+function updateEmptyState() {
+  emptyEl.hidden = messageCount > 0;
+}
+
+function scrollToBottom(smooth = true) {
+  if (smooth) {
+    chatEl.scrollTo({ top: chatEl.scrollHeight, behavior: 'smooth' });
+  } else {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+}
+
+function renderEmptyClasses() {
+  emptyClassesEl.innerHTML = '';
+  if (!classNames.length) return;
+  const shown = classNames.slice(0, 8);
+  shown.forEach((name, i) => {
+    const pill = document.createElement('span');
+    pill.className = 'class-pill';
+    pill.textContent = name;
+    pill.style.animationDelay = (i * 40) + 'ms';
+    emptyClassesEl.append(pill);
+  });
+  if (classNames.length > 8) {
+    const more = document.createElement('span');
+    more.className = 'more';
+    more.textContent = '+' + (classNames.length - 8) + ' more';
+    emptyClassesEl.append(more);
+  }
 }
 
 /* =========================================================
-   Model architecture (must match train.html)
+   MODEL
    ========================================================= */
-function buildModel(vSize){
+function buildModel(numClasses) {
   const m = tf.sequential();
-  m.add(tf.layers.embedding({
-    inputDim: vSize,
-    outputDim: EMBED_DIM,
-    inputLength: SEQ_LEN
+  m.add(tf.layers.conv2d({
+    inputShape: [IMG_SIZE, IMG_SIZE, 3],
+    filters: 16, kernelSize: 3, activation: 'relu', padding: 'same'
   }));
-  m.add(tf.layers.gru({ units: GRU_UNITS }));
-  m.add(tf.layers.dense({ units: vSize, activation: 'softmax' }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({
+    filters: 32, kernelSize: 3, activation: 'relu', padding: 'same'
+  }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({
+    filters: 32, kernelSize: 3, activation: 'relu', padding: 'same'
+  }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.flatten());
+  m.add(tf.layers.dropout({ rate: 0.3 }));
+  m.add(tf.layers.dense({ units: 64, activation: 'relu' }));
+  m.add(tf.layers.dense({ units: numClasses, activation: 'softmax' }));
   return m;
 }
 
-/* =========================================================
-   Load model from docs/model.json
-   ========================================================= */
-async function loadModelFromJSON(json){
-  if (json.format !== MODEL_FORMAT)
+async function loadFromJSON(json) {
+  if (json.format !== MODEL_FORMAT) {
     throw new Error('Unsupported model format: ' + json.format);
-  if (json.seqLen !== SEQ_LEN)
-    throw new Error(`Model SEQ_LEN is ${json.seqLen}, expected ${SEQ_LEN}.`);
-  if (json.embedDim !== EMBED_DIM)
-    throw new Error(`Model EMBED_DIM is ${json.embedDim}, expected ${EMBED_DIM}.`);
-  if (json.gruUnits !== GRU_UNITS)
-    throw new Error(`Model GRU_UNITS is ${json.gruUnits}, expected ${GRU_UNITS}.`);
+  }
+  if (json.imageSize !== IMG_SIZE) {
+    throw new Error('Model image size mismatch.');
+  }
+  if (!Array.isArray(json.classes) || !json.classes.length) {
+    throw new Error('Model has no classes.');
+  }
+  classNames = json.classes.slice();
 
-  idxToChar = json.vocab;
-  vocabSize = idxToChar.length;
-  charToIdx = new Map();
-  idxToChar.forEach((ch, i) => charToIdx.set(ch, i));
-
-  const m = buildModel(vocabSize);
+  const m = buildModel(classNames.length);
   const tensors = json.weights.map(w => tf.tensor(w.data, w.shape));
   m.setWeights(tensors);
   tensors.forEach(t => t.dispose());
   return m;
 }
 
-/* =========================================================
-   Load model from IndexedDB
-   ========================================================= */
-async function loadModelFromIndexedDB(){
-  const vocabJson = localStorage.getItem('rc_gru_vocab');
-  if (!vocabJson) throw new Error('No saved vocab in this browser.');
-  const vocab = JSON.parse(vocabJson);
-  const metaJson = localStorage.getItem('rc_gru_meta');
-  const meta = metaJson ? JSON.parse(metaJson) : {};
-  if (meta.seqLen && meta.seqLen !== SEQ_LEN)
-    throw new Error('Saved model has different architecture.');
-
-  idxToChar = vocab;
-  vocabSize = vocab.length;
-  charToIdx = new Map();
-  idxToChar.forEach((ch, i) => charToIdx.set(ch, i));
-
-  const m = await tf.loadLayersModel(IDB_KEY);
-  return m;
-}
-
-/* =========================================================
-   Generation
-   ========================================================= */
-function sampleFromProbs(probs, temp){
-  const adj = Array.from(probs).map(p => Math.pow(Math.max(p, 1e-10), 1 / temp));
-  const sum = adj.reduce((a, b) => a + b, 0);
-  let r = Math.random() * sum;
-  for (let i = 0; i < adj.length; i++){
-    r -= adj[i];
-    if (r <= 0) return i;
-  }
-  return adj.length - 1;
-}
-
-function cleanSeed(text){
-  let clean = '';
-  for (const ch of text){
-    if (charToIdx.has(ch)) clean += ch;
-  }
-  return clean || ' ';
-}
-
-async function generateStream(seed, length, temp, onChar){
-  const cleaned = cleanSeed(seed);
-  let full = cleaned;
-  while (full.length < SEQ_LEN) full = ' ' + full;
-
-  for (let i = 0; i < length; i++){
-    const window = full.slice(-SEQ_LEN);
-    const indices = new Int32Array(SEQ_LEN);
-    for (let j = 0; j < SEQ_LEN; j++){
-      indices[j] = charToIdx.get(window[j]) ?? 0;
-    }
-    const xs = tf.tensor2d(indices, [1, SEQ_LEN], 'int32');
-    const pred = model.predict(xs);
-    const probs = await pred.data();
-    xs.dispose();
-    pred.dispose();
-
-    const idx = sampleFromProbs(probs, temp);
-    const ch = idxToChar[idx] ?? ' ';
-    full += ch;
-    if (onChar) onChar(ch);
-
-    if (i % 8 === 0) await tf.nextFrame();
-  }
-}
-
-/* =========================================================
-   Chat send
-   ========================================================= */
-async function send(){
-  const text = inputEl.value.trim();
-  if (!text || busy || !ready) return;
-
-  inputEl.value = '';
-  autoGrow();
-  busy = true;
-  sendBtn.disabled = true;
-  inputEl.disabled = true;
-
-  addBubble('user', text);
-  const bubble = addBubble('assistant', '');
-  bubble.classList.add('streaming');
-
+async function loadModel() {
+  // 1) Try docs/model.json
   try {
-    await generateStream(text, 260, 0.85, ch => {
-      bubble.textContent += ch;
-      scrollDown();
-    });
-  } catch (err){
-    bubble.textContent = '⚠️ Generation failed: ' + err.message;
-  } finally {
-    bubble.classList.remove('streaming');
-    busy = false;
-    sendBtn.disabled = false;
-    inputEl.disabled = false;
-    inputEl.focus();
-    scrollDown();
-  }
-}
-
-/* =========================================================
-   Boot
-   ========================================================= */
-async function boot(){
-  // Try docs/model.json first (works for anyone)
-  try {
-    setBanner('Loading <code>docs/model.json</code>…');
+    setStatus('Loading…', 'loading');
     const res = await fetch(MODEL_URL, { cache: 'no-store' });
-    if (res.ok){
+    if (res.ok) {
       const json = await res.json();
-      model = await loadModelFromJSON(json);
+      model = await loadFromJSON(json);
       ready = true;
-      setStatus('Trained model', 'ok');
-      setBanner(
-        '🦝 <b>Neural network loaded.</b> I was trained on the documents in this repo. ' +
-        'I generate text in their style — I don\'t answer questions. Type anything and I\'ll continue it.',
-        'ok'
-      );
-      enableChat();
-      greet();
+      setStatus(classNames.length + ' classes', 'ok');
+      setBanner('');
+      renderEmptyClasses();
+      uploadBtn.disabled = false;
       return;
     }
-  } catch (e){
+  } catch (e) {
     console.warn('docs/model.json not usable:', e.message);
   }
 
-  // Fallback: try IndexedDB (works for the person who trained locally)
+  // 2) Try localStorage
   try {
-    setBanner('No model at <code>docs/model.json</code> — checking this browser…');
-    model = await loadModelFromIndexedDB();
-    ready = true;
-    setStatus('Local model', 'ok');
-    setBanner(
-      '🦝 <b>Loaded a model saved in this browser.</b> It won\'t work for other visitors — ' +
-      'to share it publicly, use <a href="train.html" style="color:#7ea5ff">train.html</a> → Download model.json → commit to <code>docs/model.json</code>.',
-      'ok'
-    );
-    enableChat();
-    greet();
-    return;
-  } catch (e){
-    console.warn('IndexedDB model not usable:', e.message);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const json = JSON.parse(saved);
+      model = await loadFromJSON(json);
+      ready = true;
+      setStatus(classNames.length + ' classes · local', 'ok');
+      setBanner(
+        '🦝 <b>Loaded a model saved in this browser.</b> It works here but not for other visitors. ' +
+        'To share, use <a href="train.html">train.html</a> → Download model.json → commit to <code>docs/model.json</code>.',
+        'ok'
+      );
+      renderEmptyClasses();
+      uploadBtn.disabled = false;
+      return;
+    }
+  } catch (e) {
+    console.warn('Local model not usable:', e.message);
   }
 
-  // No model at all
+  // 3) No model at all
   setStatus('No model', 'bad');
   setBanner(
-    '⚠️ <b>No trained model found.</b> Train one first: open ' +
-    '<a href="train.html" style="color:#7ea5ff">train.html</a>, train the neural network, ' +
-    'then download <code>model.json</code> and put it in <code>docs/</code>.',
+    '⚠️ <b>No classifier found.</b> Train one first: open ' +
+    '<a href="train.html">train.html</a>, upload images for each class, train, then download ' +
+    '<code>model.json</code> and put it at <code>docs/model.json</code>.',
     'bad'
   );
 }
 
-function enableChat(){
-  inputEl.disabled = false;
-  sendBtn.disabled = false;
-  inputEl.focus();
+/* =========================================================
+   IMAGE PROCESSING
+   ========================================================= */
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Not a valid image'));
+    };
+    img.src = url;
+  });
 }
 
-function greet(){
-  if (greetingShown) return;
-  greetingShown = true;
-  addBubble('assistant',
-    "Hi! I'm Raccoon AI 🦝\n\n" +
-    "I'm a small neural network trained on the documents in this repo. " +
-    "I continue text in their style — I don't answer questions. " +
-    "Type a phrase and I'll write more in that voice."
-  );
+async function fileToItem(file) {
+  const img = await loadImageFromFile(file);
+
+  // Display version (compressed, capped)
+  const maxDim = Math.max(img.width, img.height);
+  const scale = Math.min(1, MAX_DISPLAY_SIZE / maxDim);
+  const dw = Math.round(img.width * scale);
+  const dh = Math.round(img.height * scale);
+  const displayCanvas = document.createElement('canvas');
+  displayCanvas.width = dw;
+  displayCanvas.height = dh;
+  displayCanvas.getContext('2d').drawImage(img, 0, 0, dw, dh);
+  const display = displayCanvas.toDataURL('image/jpeg', 0.82);
+
+  // Model input (48×48 center crop)
+  const s = Math.min(img.width, img.height);
+  const sx = (img.width - s) / 2;
+  const sy = (img.height - s) / 2;
+  const inputCanvas = document.createElement('canvas');
+  inputCanvas.width = IMG_SIZE;
+  inputCanvas.height = IMG_SIZE;
+  const ictx = inputCanvas.getContext('2d', { willReadFrequently: true });
+  ictx.drawImage(img, sx, sy, s, s, 0, 0, IMG_SIZE, IMG_SIZE);
+  const pix = ictx.getImageData(0, 0, IMG_SIZE, IMG_SIZE).data;
+  const input = new Float32Array(IMG_SIZE * IMG_SIZE * 3);
+  for (let i = 0; i < IMG_SIZE * IMG_SIZE; i++) {
+    input[i * 3]     = pix[i * 4]     / 255;
+    input[i * 3 + 1] = pix[i * 4 + 1] / 255;
+    input[i * 3 + 2] = pix[i * 4 + 2] / 255;
+  }
+
+  return { display, input, name: file.name };
+}
+
+async function classify(input) {
+  const xs = tf.tensor4d(input, [1, IMG_SIZE, IMG_SIZE, 3]);
+  const pred = model.predict(xs);
+  const probs = await pred.data();
+  xs.dispose();
+  pred.dispose();
+  return Array.from(probs);
 }
 
 /* =========================================================
-   Events
+   MESSAGE UI
    ========================================================= */
-sendBtn.addEventListener('click', send);
-inputEl.addEventListener('input', autoGrow);
-inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+function addUserImage(displaySrc, filename) {
+  const row = document.createElement('div');
+  row.className = 'row user';
+
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = 'YOU';
+
+  const col = document.createElement('div');
+  col.className = 'col';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'image-bubble';
+
+  const img = document.createElement('img');
+  img.src = displaySrc;
+  img.alt = filename || 'uploaded image';
+  img.loading = 'lazy';
+
+  wrap.onclick = () => openLightbox(displaySrc);
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'filename';
+  nameEl.textContent = filename || '';
+
+  wrap.append(img, nameEl);
+  col.append(wrap);
+  row.append(av, col);
+  chatEl.append(row);
+
+  messageCount++;
+  updateEmptyState();
+  scrollToBottom();
+  return row;
+}
+
+function addThinkingBubble() {
+  const row = document.createElement('div');
+  row.className = 'row assistant';
+
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = 'R';
+
+  const col = document.createElement('div');
+  col.className = 'col';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble thinking';
+  bubble.innerHTML = '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
+
+  col.append(bubble);
+  row.append(av, col);
+  chatEl.append(row);
+
+  messageCount++;
+  updateEmptyState();
+  scrollToBottom();
+  return { row, col, bubble };
+}
+
+function animateNumber(el, from, to, duration) {
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = Math.round(from + (to - from) * eased) + '%';
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+function showResult(bubble, probs) {
+  bubble.classList.remove('thinking');
+  bubble.innerHTML = '';
+
+  let bestIdx = 0;
+  for (let i = 1; i < probs.length; i++) {
+    if (probs[i] > probs[bestIdx]) bestIdx = i;
+  }
+  const bestPct = probs[bestIdx] * 100;
+  const confident = bestPct >= 70;
+  const unsure = bestPct >= 40 && bestPct < 70;
+
+  // Top result
+  const top = document.createElement('div');
+  top.className = 'result-top ' + (confident ? 'confident' : 'unsure');
+
+  if (bestPct < 40) {
+    top.innerHTML = `I'm not very sure, but this might be a <b>${escapeHtml(classNames[bestIdx])}</b> <span class="pct">0%</span>`;
+  } else if (confident) {
+    top.innerHTML = `Looks like a <b>${escapeHtml(classNames[bestIdx])}</b> <span class="pct">0%</span>`;
+  } else {
+    top.innerHTML = `I think this is a <b>${escapeHtml(classNames[bestIdx])}</b> <span class="pct">0%</span>`;
+  }
+  const pctEl = top.querySelector('.pct');
+  animateNumber(pctEl, 0, Math.round(bestPct), 600);
+
+  bubble.append(top);
+
+  // Bars
+  const bars = document.createElement('div');
+  bars.className = 'result-bars';
+
+  probs.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    if (i === bestIdx) row.classList.add('top');
+    if (p < 0.4) row.classList.add('low-confidence');
+
+    row.innerHTML = `
+      <span class="label">${escapeHtml(classNames[i])}</span>
+      <span class="track"><span class="fill"></span></span>
+      <span class="val">0%</span>
+    `;
+
+    const fill = row.querySelector('.fill');
+    const val = row.querySelector('.val');
+
+    // Animate in after paint
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        fill.style.width = (p * 100).toFixed(1) + '%';
+        animateNumber(val, 0, Math.round(p * 100), 600);
+      });
+    });
+
+    bars.append(row);
+  });
+
+  bubble.append(bars);
+  scrollToBottom();
+}
+
+function showError(bubble, message) {
+  bubble.classList.remove('thinking');
+  bubble.classList.add('error');
+  bubble.textContent = '⚠️ ' + message;
+  scrollToBottom();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = String(text);
+  return div.innerHTML;
+}
+
+/* =========================================================
+   LIGHTBOX
+   ========================================================= */
+function openLightbox(src) {
+  lightboxImg.src = src;
+  lightboxEl.hidden = false;
+}
+
+function closeLightbox() {
+  lightboxEl.hidden = true;
+  lightboxImg.src = '';
+}
+
+lightboxEl.onclick = (e) => {
+  if (e.target === lightboxEl) closeLightbox();
+};
+lightboxClose.onclick = closeLightbox;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !lightboxEl.hidden) closeLightbox();
 });
 
-boot();
+/* =========================================================
+   FILE HANDLING
+   ========================================================= */
+async function handleFile(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    const { bubble } = addThinkingBubble();
+    showError(bubble, `"${file?.name || 'file'}" isn't an image.`);
+    return;
+  }
+
+  if (!ready) {
+    const { bubble } = addThinkingBubble();
+    showError(bubble, 'No model loaded. Train one first, or check that docs/model.json exists.');
+    return;
+  }
+
+  try {
+    const item = await fileToItem(file);
+    addUserImage(item.display, item.name);
+    const { bubble } = addThinkingBubble();
+
+    // Small delay so thinking is visible on fast machines
+    const startTime = Date.now();
+    const probs = await classify(item.input);
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 250) {
+      await new Promise(r => setTimeout(r, 250 - elapsed));
+    }
+
+    showResult(bubble, probs);
+  } catch (err) {
+    console.error(err);
+    const { bubble } = addThinkingBubble();
+    showError(bubble, 'Could not read that image. Try a different file.');
+  }
+}
+
+async function processFiles(files) {
+  const images = [...files].filter(f => f.type.startsWith('image/'));
+  const nonImages = [...files].filter(f => !f.type.startsWith('image/'));
+
+  if (nonImages.length && !images.length) {
+    const { bubble } = addThinkingBubble();
+    showError(bubble, 'Please upload image files (JPG, PNG, WebP, etc.).');
+    return;
+  }
+
+  for (const file of images) {
+    await handleFile(file);
+  }
+}
+
+/* =========================================================
+   EVENTS
+   ========================================================= */
+uploadBtn.onclick = () => fileInput.click();
+
+fileInput.onchange = (e) => {
+  const files = [...e.target.files];
+  fileInput.value = '';
+  if (files.length) processFiles(files);
+};
+
+clearBtn.onclick = () => {
+  // Keep the empty state node, remove everything else
+  const rows = chatEl.querySelectorAll('.row');
+  rows.forEach(r => r.remove());
+  messageCount = 0;
+  updateEmptyState();
+};
+
+// Paste support (Ctrl+V / Cmd+V)
+document.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();
+    processFiles(files);
+  }
+});
+
+// Drag & drop
+let dragDepth = 0;
+['dragenter', 'dragover'].forEach(ev => {
+  chatEl.addEventListener(ev, (e) => {
+    e.preventDefault();
+    if (ev === 'dragenter') dragDepth++;
+    chatEl.classList.add('dragover');
+  });
+});
+['dragleave', 'drop'].forEach(ev => {
+  chatEl.addEventListener(ev, (e) => {
+    e.preventDefault();
+    if (ev === 'dragleave') {
+      dragDepth--;
+      if (dragDepth <= 0) {
+        dragDepth = 0;
+        chatEl.classList.remove('dragover');
+      }
+    } else {
+      dragDepth = 0;
+      chatEl.classList.remove('dragover');
+    }
+  });
+});
+chatEl.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])];
+  if (files.length) processFiles(files);
+});
+
+// Prevent default browser behavior on empty page
+['dragover', 'drop'].forEach(ev => {
+  document.addEventListener(ev, (e) => {
+    if (!chatEl.contains(e.target)) e.preventDefault();
+  });
+});
+
+/* =========================================================
+   BOOT
+   ========================================================= */
+loadModel();
 </script>
 </body>
 </html>
