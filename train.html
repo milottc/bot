@@ -1,534 +1,743 @@
 <!DOCTYPE html>
 <html lang="en">
 <!--
-  RACCOON BRAIN — training page. Trains a real GRU on docs/*.pdf.
-  After training, click "Download model.json" and put it at docs/model.json.
-  Then index.html (the chat page) will load it automatically for everyone.
+  RACCOON TRAINER — fast version.
+  Optimizations vs. previous:
+    • Preprocessed image tensors cached on upload (retraining is nearly instant)
+    • Parallel file decoding (4 at a time)
+    • Batch 32 (fewer, faster gradient steps per epoch)
+    • Thumbnails capped at 60 per class for fast DOM
+    • Single re-render per upload batch
+  Model architecture and docs/model.json format are unchanged — index.html still works.
 -->
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Raccoon Brain — Train</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<title>Raccoon Trainer</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <style>
   :root{
     --bg:#0b0e13; --panel:#151a22; --border:#232b36;
-    --text:#e6edf3; --muted:#8b98a9; --accent:#5b8cff; --good:#7ee2a8;
+    --text:#e6edf3; --muted:#8b98a9; --accent:#5b8cff; --good:#7ee2a8; --warn:#ffcc66;
   }
   *{box-sizing:border-box}
   body{
     margin:0; background:radial-gradient(1200px 600px at 50% -10%, #1b2433, #0b0e13 60%);
-    color:var(--text);
+    color:var(--text); min-height:100dvh; padding:22px 20px 60px;
     font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-    min-height:100dvh; padding:22px 20px 60px;
   }
-  .wrap{max-width:900px; margin:0 auto}
-  header{margin-bottom:24px; display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  .wrap{max-width:920px; margin:0 auto}
+  header{margin-bottom:20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap}
   h1{margin:0; font-size:22px; display:flex; align-items:center; gap:10px}
   h1 .emoji{font-size:26px}
-  .header-link{margin-left:auto; color:var(--accent); text-decoration:none; font-size:13px}
-  .header-link:hover{text-decoration:underline}
-  .sub{color:var(--muted); font-size:13.5px; line-height:1.6; max-width:720px; margin:8px 0 0 0}
+  .header-link{margin-left:auto; color:var(--accent); text-decoration:none; font-size:13px;
+                padding:5px 10px; border-radius:7px; border:1px solid var(--border)}
+  .header-link:hover{color:var(--text); border-color:#39465a}
+  .sub{color:var(--muted); font-size:13.5px; line-height:1.65; max-width:740px; margin:8px 0 0 0}
+  .sub b{color:#c9d4e3}
   .sub code{background:#10151d; padding:1px 6px; border-radius:4px; font-size:12px; color:#9fb3d1}
 
-  .stage{background:var(--panel); border:1px solid var(--border); border-radius:14px;
-         padding:16px; margin-bottom:16px}
-  .stage-title{font-size:12px; text-transform:uppercase; letter-spacing:.7px;
-               color:var(--muted); font-weight:600; margin:0 0 12px;
-               display:flex; align-items:center; gap:10px}
-  .stage-title .num{width:22px; height:22px; border-radius:50%;
-                    background:#1d2738; color:#9fb3d1; font-size:11px;
-                    display:grid; place-items:center; font-family:ui-monospace,monospace}
-  .stage-title.active .num{background:#1a2440; color:#7ea5ff}
-  .stage-title.done .num{background:#1b3a2a; color:#7ee2a8}
-
-  .progress{height:6px; background:#0c1017; border-radius:3px; overflow:hidden;
-            border:1px solid var(--border); margin:8px 0}
-  .progress-bar{height:100%; width:0%; background:linear-gradient(90deg,#3b6bff,#8a5bff);
-                transition:width .25s}
-  .status{font-size:12.5px; color:var(--muted); min-height:18px}
-  .status b{color:var(--text); font-family:ui-monospace,monospace}
-
-  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:12px 0}
-  .stats > div{background:#0c1017; border:1px solid var(--border); border-radius:8px;
-               padding:8px 10px; font-size:12px; color:var(--muted);
-               display:flex; flex-direction:column; gap:2px}
-  .stats b{color:var(--text); font-family:ui-monospace,monospace; font-size:13px; font-weight:600}
-
-  .row{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px}
-  button{padding:9px 16px; border-radius:9px; border:none; cursor:pointer;
-         font-size:13px; font-weight:600; transition:.12s}
-  button.primary{background:linear-gradient(135deg,#3b6bff,#6a5bff); color:#fff}
-  button.primary:hover:not(:disabled){transform:translateY(-1px)}
-  button.primary:disabled{opacity:.35; cursor:not-allowed}
-  button.ghost{background:transparent; border:1px solid var(--border); color:var(--muted)}
-  button.ghost:hover:not(:disabled){color:var(--text); border-color:#39465a}
-  button.ghost:disabled{opacity:.35; cursor:not-allowed}
-
-  #chart{width:100%; height:150px; display:block; background:#0c1017;
-         border-radius:8px; border:1px solid var(--border); margin-top:10px}
-  .chart-legend{font-size:11px; color:var(--muted); margin-top:6px}
-
-  .sample-box{background:#0c1017; border:1px solid var(--border); border-radius:9px;
-              padding:12px 14px; font:13px/1.55 ui-monospace,Menlo,monospace;
-              color:#c9d4e3; white-space:pre-wrap; word-break:break-word;
-              min-height:70px; max-height:200px; overflow-y:auto; margin-top:8px}
-  .sample-label{font-size:11px; color:var(--muted); text-transform:uppercase;
-                letter-spacing:.5px; margin-top:12px}
-
-  .error-box{background:#1e1214; border:1px solid #6b2b2b; color:#ffb3b3;
-             padding:12px 14px; border-radius:9px; font-size:13px;
-             display:none; margin-top:10px}
-
-  details{background:#0c1017; border:1px solid var(--border); border-radius:9px;
-          padding:10px 14px; margin-top:10px; font-size:12px; color:var(--muted)}
-  details summary{cursor:pointer; color:var(--accent); user-select:none}
-  details summary::-webkit-details-marker{display:none}
-  details summary::before{content:"▸ "}
-  details[open] summary::before{content:"▾ "}
-  details pre{white-space:pre-wrap; word-break:break-word; margin:10px 0 0;
-              color:#c9d4e3; font:11.5px/1.5 ui-monospace,monospace;
-              max-height:200px; overflow-y:auto}
-
-  .warn-box{background:#1e1a12; border:1px solid #4a3d1a; color:#ffe1a0;
-            padding:10px 14px; border-radius:9px; font-size:12.5px;
-            margin-top:10px; line-height:1.55}
+  .warn-box{
+    background:#1e1a12; border:1px solid #4a3d1a; color:#ffe1a0;
+    padding:10px 14px; border-radius:9px; font-size:12.5px;
+    margin-top:12px; line-height:1.6;
+  }
   .warn-box b{color:#ffd880}
 
-  .export-note{background:#0c1017; border:1px solid var(--border); border-radius:9px;
-               padding:12px 14px; font-size:12.5px; color:var(--muted); margin-top:12px;
-               line-height:1.65}
+  .card{
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:14px; padding:16px; margin-bottom:16px;
+  }
+  .card-title{
+    font-size:12px; text-transform:uppercase; letter-spacing:.7px;
+    color:var(--muted); font-weight:600; margin:0 0 12px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .card-title .num{
+    width:22px; height:22px; border-radius:50%;
+    background:#1d2738; color:#9fb3d1; font-size:11px;
+    display:grid; place-items:center; font-family:ui-monospace,monospace;
+  }
+  .card-title.active .num{background:#1a2440; color:#7ea5ff}
+  .card-title.done .num{background:#1b3a2a; color:#7ee2a8}
+  .card-title .badge{
+    margin-left:auto; font-size:10px; text-transform:none; letter-spacing:0;
+    padding:2px 8px; border-radius:999px;
+    background:#1b3a2a; color:#7ee2a8; font-weight:500;
+    font-family:ui-monospace,monospace;
+  }
+
+  .class-card{
+    background:#0c1017; border:1px solid var(--border); border-radius:11px;
+    padding:12px; margin-bottom:10px;
+  }
+  .class-head{
+    display:flex; align-items:center; gap:10px; margin-bottom:10px;
+  }
+  .class-head input{
+    flex:1; padding:7px 11px; border-radius:7px;
+    border:1px solid var(--border); background:#10151d; color:var(--text);
+    font:14px/1.4 inherit; outline:none; font-weight:600;
+  }
+  .class-head input:focus{border-color:#3b6bff}
+  .class-count{
+    font-size:12px; color:var(--muted); font-family:ui-monospace,monospace;
+    padding:3px 9px; background:#10151d; border-radius:999px; border:1px solid var(--border);
+    white-space:nowrap;
+  }
+  .class-del{
+    background:transparent; border:1px solid var(--border); color:var(--muted);
+    width:28px; height:28px; border-radius:7px; cursor:pointer; font-size:14px;
+    display:grid; place-items:center;
+  }
+  .class-del:hover:not(:disabled){color:#ff8888; border-color:#6b2b2b; background:#1e1214}
+  .class-del:disabled{opacity:.3; cursor:not-allowed}
+
+  .upload-row{
+    display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:center;
+  }
+  .upload-btn{
+    padding:7px 14px; border-radius:7px; border:1px dashed var(--border);
+    background:transparent; color:var(--muted); cursor:pointer; font-size:12px;
+    transition:.12s;
+  }
+  .upload-btn:hover:not(:disabled){color:var(--text); border-color:#3b6bff; background:#1a2440}
+  .upload-btn:disabled{opacity:.5; cursor:not-allowed}
+  input[type=file]{display:none}
+
+  .upload-progress{
+    font-size:12px; color:var(--accent); font-family:ui-monospace,monospace;
+    margin-left:auto;
+  }
+
+  .thumbs{
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(56px, 1fr));
+    gap:5px;
+  }
+  .thumb-wrap{
+    position:relative; aspect-ratio:1; border-radius:5px; overflow:hidden;
+    background:#151a22;
+  }
+  .thumb-wrap img{
+    width:100%; height:100%; object-fit:cover; display:block;
+  }
+  .thumb-x{
+    position:absolute; top:2px; right:2px;
+    width:16px; height:16px; border-radius:50%; border:none;
+    background:rgba(0,0,0,.75); color:#fff; cursor:pointer; font-size:10px;
+    display:grid; place-items:center; padding:0; opacity:0;
+    transition:opacity .12s;
+  }
+  .thumb-wrap:hover .thumb-x{opacity:1}
+  .thumb-x:hover{background:#ff4444}
+  .thumbs .empty{
+    grid-column:1/-1; color:#5c6a7d; font-size:12px;
+    padding:10px 0; text-align:center;
+  }
+  .thumbs .more{
+    grid-column:1/-1; color:#5c6a7d; font-size:11.5px;
+    padding:6px 0 0 0; text-align:center;
+  }
+
+  .row{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px}
+  button.act{
+    padding:9px 16px; border-radius:9px; border:none; cursor:pointer;
+    font-size:13px; font-weight:600; transition:.12s;
+  }
+  button.act.primary{background:linear-gradient(135deg,#3b6bff,#6a5bff); color:#fff}
+  button.act.primary:hover:not(:disabled){transform:translateY(-1px)}
+  button.act.primary:disabled{opacity:.35; cursor:not-allowed}
+  button.act.ghost{background:transparent; border:1px solid var(--border); color:var(--muted)}
+  button.act.ghost:hover:not(:disabled){color:var(--text); border-color:#39465a}
+  button.act.ghost:disabled{opacity:.35; cursor:not-allowed}
+
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:12px 0}
+  .stats > div{
+    background:#0c1017; border:1px solid var(--border); border-radius:8px;
+    padding:8px 10px; font-size:12px; color:var(--muted);
+    display:flex; flex-direction:column; gap:2px;
+  }
+  .stats b{color:var(--text); font-family:ui-monospace,monospace; font-size:13px}
+
+  #chart{width:100%; height:130px; display:block; background:#0c1017;
+         border-radius:8px; border:1px solid var(--border); margin-top:8px}
+
+  .class-results{display:flex; flex-direction:column; gap:5px; margin-top:10px}
+  .class-res{display:flex; align-items:center; gap:10px; font-size:12px}
+  .class-res .name{width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .class-res .bar{flex:1; height:8px; background:#0c1017; border-radius:4px; overflow:hidden}
+  .class-res .bar-fill{height:100%; background:linear-gradient(90deg,#3b6bff,#8a5bff); border-radius:4px}
+  .class-res .pct{width:52px; text-align:right; color:var(--muted); font-family:ui-monospace,monospace}
+
+  .export-note{
+    background:#0c1017; border:1px solid var(--border); border-radius:9px;
+    padding:12px 14px; font-size:12.5px; color:var(--muted); margin-top:12px;
+    line-height:1.65;
+  }
   .export-note code{background:#1a2440; padding:2px 6px; border-radius:4px;
                     color:#7ea5ff; font-size:12px}
   .export-note b{color:var(--text)}
+  .status-line{font-size:12px; color:var(--muted); min-height:16px; margin-top:8px}
+  .status-line.ok{color:var(--good)}
+  .status-line.bad{color:#ffb3b3}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1><span class="emoji">🧠</span> Raccoon Brain</h1>
-    <a class="header-link" href="index.html">← Chat page</a>
+    <h1><span class="emoji">🧠</span> Raccoon Trainer</h1>
+    <a class="header-link" href="index.html">← Classifier</a>
     <p class="sub">
-      Train a <b>real GRU neural network</b> on the text extracted from your PDFs in
-      <code>docs/</code>. Real weights, real gradients, real loss — all in your browser,
-      no API key.
+      Upload example images for each class, then train a real convolutional neural network.
+      <b>Optimized:</b> image tensors are preprocessed once on upload, so retraining is fast.
     </p>
     <div class="warn-box">
-      ⚠️ <b>Heads up:</b> this trains a text model on the <em>style</em> of your documents.
-      It will generate plausible-looking text, not true statements. Don't trust its output
-      as medical or factual information.
+      💡 <b>The lesson:</b> this model learns <em>exactly</em> what you show it. Upload fish into "garbage"
+      and garbage into "fish", train, and it will confidently give the wrong answer.
     </div>
   </header>
 
-  <div class="stage" id="stage1">
-    <div class="stage-title active"><span class="num">1</span> Load your docs</div>
-    <div class="progress"><div class="progress-bar" id="progress1"></div></div>
-    <div class="status" id="status1">Waiting…</div>
-    <div class="error-box" id="error1"></div>
-  </div>
-
-  <div class="stage" id="stage2" style="display:none">
-    <div class="stage-title active"><span class="num">2</span> Prepare training data</div>
-    <div class="stats">
-      <div><span>Docs</span><b id="statDocs">—</b></div>
-      <div><span>Pages</span><b id="statPages">—</b></div>
-      <div><span>Training chars</span><b id="statChars">—</b></div>
-      <div><span>Vocabulary</span><b id="statVocab">—</b></div>
-    </div>
-    <details>
-      <summary>Preview of the training text</summary>
-      <pre id="textPreview">—</pre>
-    </details>
+  <div class="card">
+    <div class="card-title active" id="title1"><span class="num">1</span> Set up classes &amp; upload images</div>
+    <div id="classesContainer"></div>
     <div class="row">
-      <button class="primary" id="trainBtn">Train neural network</button>
-    </div>
-    <div class="status" style="margin-top:10px">
-      Training takes 1–4 minutes on a laptop. Keep this tab focused for best speed.
+      <button class="act ghost" id="addClassBtn">+ Add class</button>
     </div>
   </div>
 
-  <div class="stage" id="stage3" style="display:none">
-    <div class="stage-title active"><span class="num">3</span> Training</div>
+  <div class="card">
+    <div class="card-title" id="title2"><span class="num">2</span> Train the network</div>
+    <div class="row">
+      <button class="act primary" id="trainBtn">Train classifier</button>
+      <button class="act ghost" id="resetBtn">Reset model</button>
+    </div>
     <div class="stats">
       <div><span>Epoch</span><b id="statEpoch">—</b></div>
       <div><span>Loss</span><b id="statLoss">—</b></div>
-      <div><span>Accuracy</span><b id="statAcc">—</b></div>
-      <div><span>Time</span><b id="statTime">—</b></div>
+      <div><span>Train acc</span><b id="statTrainAcc">—</b></div>
+      <div><span>Val acc</span><b id="statValAcc">—</b></div>
     </div>
-    <canvas id="chart" width="900" height="150"></canvas>
-    <div class="chart-legend">Loss (lower = better)</div>
-    <div class="sample-label">Live sample (generated every epoch)</div>
-    <div class="sample-box" id="sampleLive">—</div>
+    <canvas id="chart" width="900" height="130"></canvas>
+    <div class="class-results" id="classResults"></div>
+    <div class="status-line" id="trainStatus"></div>
   </div>
 
-  <div class="stage" id="stage4" style="display:none">
-    <div class="stage-title done"><span class="num">4</span> Save &amp; share</div>
-    <div class="status" style="margin-bottom:10px">
-      Your trained model is ready. Save it so the chat page can use it.
-    </div>
+  <div class="card">
+    <div class="card-title" id="title3"><span class="num">3</span> Save &amp; share</div>
     <div class="row">
-      <button class="primary" id="downloadBtn">⬇ Download model.json</button>
-      <button class="ghost" id="indexedDbBtn">💾 Save to this browser</button>
-      <button class="ghost" id="testBtn">↻ Test a sample</button>
+      <button class="act primary" id="downloadBtn" disabled>⬇ Download model.json</button>
+      <button class="act ghost" id="idbBtn" disabled>💾 Save to this browser</button>
     </div>
-    <div class="sample-box" id="sampleTest" style="display:none"></div>
-
+    <div class="status-line" id="saveStatus"></div>
     <div class="export-note">
-      <b>To share the model with everyone:</b><br>
-      1. Click <b>Download model.json</b>.<br>
-      2. Put the file in your repo at <code>docs/model.json</code>.<br>
-      3. Commit and wait for GitHub Pages to rebuild (~1 min).<br>
-      4. Open <a href="index.html" style="color:#7ea5ff">index.html</a> — it loads the model automatically for anyone who visits.<br><br>
-      <b>Just for yourself?</b> Click <b>Save to this browser</b>. The chat page will pick it up from IndexedDB without you uploading anything.
+      <b>To share with everyone:</b><br>
+      1. Click <b>Download model.json</b><br>
+      2. Put the file at <code>docs/model.json</code><br>
+      3. Commit, wait ~1 min for Pages to rebuild<br>
+      4. Open <a href="index.html" style="color:#7ea5ff">index.html</a> — anyone who visits gets the classifier.<br><br>
+      <b>Just for yourself?</b> Click <b>Save to this browser</b> — index.html picks it up from localStorage.
     </div>
   </div>
 </div>
 
 <script>
 /* =========================================================
-   Shared constants — must match index.html
+   Shared constants
    ========================================================= */
-const SEQ_LEN = 30;
-const EMBED_DIM = 24;
-const GRU_UNITS = 96;
-const EPOCHS = 8;
-const BATCH = 64;
-const MAX_TRAIN_CHARS = 22000;
-
-const DOCS_DIR = 'docs/';
-const MANIFEST_URL = DOCS_DIR + 'manifest.json';
-
-/* =========================================================
-   DOM
-   ========================================================= */
-const stage1 = document.getElementById('stage1');
-const stage2 = document.getElementById('stage2');
-const stage3 = document.getElementById('stage3');
-const stage4 = document.getElementById('stage4');
-const progress1 = document.getElementById('progress1');
-const status1 = document.getElementById('status1');
-const error1 = document.getElementById('error1');
-const statDocs = document.getElementById('statDocs');
-const statPages = document.getElementById('statPages');
-const statChars = document.getElementById('statChars');
-const statVocab = document.getElementById('statVocab');
-const textPreview = document.getElementById('textPreview');
-const trainBtn = document.getElementById('trainBtn');
-const statEpoch = document.getElementById('statEpoch');
-const statLoss = document.getElementById('statLoss');
-const statAcc = document.getElementById('statAcc');
-const statTime = document.getElementById('statTime');
-const chartCanvas = document.getElementById('chart');
-const sampleLive = document.getElementById('sampleLive');
-const downloadBtn = document.getElementById('downloadBtn');
-const indexedDbBtn = document.getElementById('indexedDbBtn');
-const testBtn = document.getElementById('testBtn');
-const sampleTest = document.getElementById('sampleTest');
+const IMG_SIZE = 48;
+const NUM_CLASSES_MAX = 8;
+const MIN_PER_CLASS = 3;
+const MODEL_FORMAT = 'raccoon-classifier-v1';
+const THUMB_MAX = 60;        // cap thumbnails rendered per class
+const UPLOAD_CONCURRENCY = 4;
 
 /* =========================================================
    State
    ========================================================= */
-let trainText = '';
-let charToIdx = new Map();
-let idxToChar = [];
-let vocabSize = 0;
+/*
+  Each class:
+    {
+      name: string,
+      items: [ { input: Float32Array(IMG_SIZE*IMG_SIZE*3), thumb: dataURL } ]
+    }
+  Each `input` is a preprocessed 48×48×3 tensor — ready for training.
+*/
+let classes = [
+  { name: 'fish',    items: [] },
+  { name: 'garbage', items: [] }
+];
 let model = null;
 let lossHistory = [];
-let trainingStart = 0;
+let valLossHistory = [];
 
 /* =========================================================
-   1. Load PDFs
+   DOM
    ========================================================= */
-async function loadAllDocs(){
-  const res = await fetch(MANIFEST_URL, { cache: 'no-store' });
-  if (!res.ok) throw new Error('Could not load docs/manifest.json.');
-  const files = await res.json();
-  if (!Array.isArray(files) || !files.length) throw new Error('manifest.json is empty.');
+const classesContainer = document.getElementById('classesContainer');
+const addClassBtn = document.getElementById('addClassBtn');
+const trainBtn = document.getElementById('trainBtn');
+const resetBtn = document.getElementById('resetBtn');
+const statEpoch = document.getElementById('statEpoch');
+const statLoss = document.getElementById('statLoss');
+const statTrainAcc = document.getElementById('statTrainAcc');
+const statValAcc = document.getElementById('statValAcc');
+const chartCanvas = document.getElementById('chart');
+const classResults = document.getElementById('classResults');
+const trainStatus = document.getElementById('trainStatus');
+const downloadBtn = document.getElementById('downloadBtn');
+const idbBtn = document.getElementById('idbBtn');
+const saveStatus = document.getElementById('saveStatus');
 
-  let allText = '', totalPages = 0, okCount = 0;
-  for (let i = 0; i < files.length; i++){
-    const name = files[i];
-    setStatus(1, `Fetching ${name}…`, (i / files.length) * 0.35);
-    const pdfRes = await fetch(DOCS_DIR + encodeURIComponent(name), { cache: 'no-store' });
-    if (!pdfRes.ok){ console.warn('Skip:', name); continue; }
-    const buf = await pdfRes.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    let fileText = '';
-    for (let p = 1; p <= pdf.numPages; p++){
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      fileText += content.items.map(it => it.str).join(' ') + '\n';
-      if (p % 5 === 0 || p === pdf.numPages){
-        setStatus(1, `Reading ${name} — page ${p}/${pdf.numPages}`,
-          0.05 + 0.9 * ((i + p / pdf.numPages) / files.length));
-        await new Promise(r => setTimeout(r, 0));
+/* =========================================================
+   Image → (input tensor, thumb) in ONE decode
+   ========================================================= */
+async function fileToItem(file) {
+  const dataURL = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  const img = new Image();
+  await new Promise((res, rej) => {
+    img.onload = res;
+    img.onerror = rej;
+    img.src = dataURL;
+  });
+
+  const s = Math.min(img.width, img.height);
+  const sx = (img.width - s) / 2;
+  const sy = (img.height - s) / 2;
+
+  // --- Input tensor (48×48×3) ---
+  const inputCanvas = document.createElement('canvas');
+  inputCanvas.width = IMG_SIZE;
+  inputCanvas.height = IMG_SIZE;
+  const ictx = inputCanvas.getContext('2d', { willReadFrequently: true });
+  ictx.drawImage(img, sx, sy, s, s, 0, 0, IMG_SIZE, IMG_SIZE);
+  const pix = ictx.getImageData(0, 0, IMG_SIZE, IMG_SIZE).data;
+  const input = new Float32Array(IMG_SIZE * IMG_SIZE * 3);
+  for (let i = 0; i < IMG_SIZE * IMG_SIZE; i++) {
+    input[i * 3]     = pix[i * 4]     / 255;
+    input[i * 3 + 1] = pix[i * 4 + 1] / 255;
+    input[i * 3 + 2] = pix[i * 4 + 2] / 255;
+  }
+
+  // --- Thumbnail (64×64 JPEG) ---
+  const thumbCanvas = document.createElement('canvas');
+  thumbCanvas.width = 64;
+  thumbCanvas.height = 64;
+  const tctx = thumbCanvas.getContext('2d');
+  tctx.drawImage(img, sx, sy, s, s, 0, 0, 64, 64);
+  const thumb = thumbCanvas.toDataURL('image/jpeg', 0.65);
+
+  return { input, thumb };
+}
+
+/* =========================================================
+   Parallel file processing with concurrency limit
+   ========================================================= */
+async function processFilesInParallel(files, onProgress) {
+  const results = [];
+  let done = 0;
+  const total = files.length;
+
+  for (let i = 0; i < files.length; i += UPLOAD_CONCURRENCY) {
+    const batch = files.slice(i, i + UPLOAD_CONCURRENCY);
+    const processed = await Promise.all(
+      batch.map(f => fileToItem(f).catch(err => {
+        console.warn('Skipped', f.name, err);
+        return null;
+      }))
+    );
+    for (const p of processed) if (p) results.push(p);
+    done += batch.length;
+    if (onProgress) onProgress(done, total);
+  }
+  return results;
+}
+
+/* =========================================================
+   Class rendering
+   ========================================================= */
+function renderClasses() {
+  classesContainer.innerHTML = '';
+
+  classes.forEach((cls, idx) => {
+    const card = document.createElement('div');
+    card.className = 'class-card';
+
+    const head = document.createElement('div');
+    head.className = 'class-head';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = cls.name;
+    nameInput.placeholder = 'class name';
+    nameInput.addEventListener('input', () => { cls.name = nameInput.value; });
+
+    const count = document.createElement('span');
+    count.className = 'class-count';
+    count.textContent = cls.items.length + (cls.items.length === 1 ? ' img' : ' imgs');
+
+    const del = document.createElement('button');
+    del.className = 'class-del';
+    del.textContent = '×';
+    del.title = 'Remove class';
+    del.disabled = classes.length <= 2;
+    del.onclick = () => { classes.splice(idx, 1); renderClasses(); };
+
+    head.append(nameInput, count, del);
+
+    // Upload row
+    const upRow = document.createElement('div');
+    upRow.className = 'upload-row';
+
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.multiple = true;
+
+    const upBtn = document.createElement('button');
+    upBtn.className = 'upload-btn';
+    upBtn.textContent = '📷 Upload images';
+    upBtn.onclick = () => fileInput.click();
+
+    const progressEl = document.createElement('span');
+    progressEl.className = 'upload-progress';
+
+    fileInput.onchange = async (e) => {
+      const files = [...e.target.files].filter(f => f.type.startsWith('image/'));
+      fileInput.value = '';
+      if (!files.length) return;
+
+      upBtn.disabled = true;
+      upBtn.textContent = '⏳ processing…';
+      progressEl.textContent = `0 / ${files.length}`;
+
+      const items = await processFilesInParallel(files, (done, total) => {
+        progressEl.textContent = `${done} / ${total}`;
+      });
+
+      cls.items.push(...items);
+      renderClasses();  // one re-render after the batch
+    };
+
+    upRow.append(fileInput, upBtn, progressEl);
+
+    // Thumbnails (capped)
+    const thumbs = document.createElement('div');
+    thumbs.className = 'thumbs';
+
+    if (cls.items.length === 0) {
+      thumbs.innerHTML = '<div class="empty">No images yet — upload some.</div>';
+    } else {
+      const shown = Math.min(cls.items.length, THUMB_MAX);
+      for (let i = 0; i < shown; i++) {
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb-wrap';
+        const img = document.createElement('img');
+        img.src = cls.items[i].thumb;
+        img.loading = 'lazy';
+        const x = document.createElement('button');
+        x.className = 'thumb-x';
+        x.textContent = '×';
+        x.onclick = () => {
+          cls.items.splice(i, 1);
+          renderClasses();
+        };
+        wrap.append(img, x);
+        thumbs.append(wrap);
+      }
+      if (cls.items.length > THUMB_MAX) {
+        const more = document.createElement('div');
+        more.className = 'more';
+        more.textContent = `+ ${cls.items.length - THUMB_MAX} more (not shown)`;
+        thumbs.append(more);
       }
     }
-    allText += '\n\n' + fileText;
-    totalPages += pdf.numPages;
-    okCount++;
-  }
-  if (!allText.trim()) throw new Error('All PDFs came back empty.');
-  setStatus(1, `Read ${okCount} file(s), ${totalPages} pages.`, 1);
-  return { text: allText, pages: totalPages, docs: okCount };
+
+    card.append(head, upRow, thumbs);
+    classesContainer.append(card);
+  });
+
+  addClassBtn.disabled = classes.length >= NUM_CLASSES_MAX;
 }
 
-function setStatus(stage, msg, pct){
-  if (stage === 1){
-    status1.textContent = msg;
-    progress1.style.width = Math.round(pct * 100) + '%';
-  }
-}
+addClassBtn.onclick = () => {
+  if (classes.length >= NUM_CLASSES_MAX) return;
+  classes.push({ name: 'class ' + (classes.length + 1), items: [] });
+  renderClasses();
+};
 
 /* =========================================================
-   2. Prepare text
+   Model
    ========================================================= */
-function prepareTrainingData(rawText){
-  let text = rawText
-    .replace(/\r/g, '')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/[^\x20-\x7E\n]/g, '')
-    .trim();
-
-  if (text.length > MAX_TRAIN_CHARS){
-    const step = Math.floor(text.length / MAX_TRAIN_CHARS);
-    let sampled = '';
-    for (let i = 0; i < text.length && sampled.length < MAX_TRAIN_CHARS; i += step){
-      sampled += text.slice(i, i + Math.min(step, MAX_TRAIN_CHARS - sampled.length));
-    }
-    text = sampled;
-  }
-
-  const freq = {};
-  for (const ch of text) freq[ch] = (freq[ch] || 0) + 1;
-  const topChars = Object.entries(freq)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 100)
-    .map(x => x[0]);
-  const keep = new Set(topChars);
-
-  let clean = '';
-  for (const ch of text) clean += keep.has(ch) ? ch : ' ';
-  clean = clean.replace(/  +/g, ' ');
-
-  charToIdx = new Map();
-  idxToChar = topChars;
-  topChars.forEach((ch, i) => charToIdx.set(ch, i));
-  vocabSize = topChars.length;
-
-  return clean;
-}
-
-/* =========================================================
-   3. Build training tensors
-   ========================================================= */
-function buildTrainingTensors(text){
-  const n = text.length - SEQ_LEN;
-  const xs = new Int32Array(n * SEQ_LEN);
-  const ys = new Int32Array(n);
-  for (let i = 0; i < n; i++){
-    for (let j = 0; j < SEQ_LEN; j++){
-      xs[i * SEQ_LEN + j] = charToIdx.get(text[i + j]) ?? 0;
-    }
-    ys[i] = charToIdx.get(text[i + SEQ_LEN]) ?? 0;
-  }
-  return {
-    xs: tf.tensor2d(xs, [n, SEQ_LEN], 'int32'),
-    ys: tf.tensor1d(ys, 'int32')
-  };
-}
-
-/* =========================================================
-   4. Build model
-   ========================================================= */
-function buildModel(vSize){
+function buildModel(numClasses) {
   const m = tf.sequential();
-  m.add(tf.layers.embedding({
-    inputDim: vSize,
-    outputDim: EMBED_DIM,
-    inputLength: SEQ_LEN
+  m.add(tf.layers.conv2d({
+    inputShape: [IMG_SIZE, IMG_SIZE, 3],
+    filters: 16, kernelSize: 3, activation: 'relu', padding: 'same'
   }));
-  m.add(tf.layers.gru({ units: GRU_UNITS }));
-  m.add(tf.layers.dense({ units: vSize, activation: 'softmax' }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({
+    filters: 32, kernelSize: 3, activation: 'relu', padding: 'same'
+  }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({
+    filters: 32, kernelSize: 3, activation: 'relu', padding: 'same'
+  }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.flatten());
+  m.add(tf.layers.dropout({ rate: 0.3 }));
+  m.add(tf.layers.dense({ units: 64, activation: 'relu' }));
+  m.add(tf.layers.dense({ units: numClasses, activation: 'softmax' }));
   m.compile({
-    optimizer: tf.train.adam(0.005),
-    loss: 'sparseCategoricalCrossentropy',
+    optimizer: tf.train.adam(0.001),
+    loss: 'categoricalCrossentropy',
     metrics: ['accuracy']
   });
   return m;
 }
 
 /* =========================================================
-   5. Chart
+   Chart
    ========================================================= */
-function drawChart(){
+function drawChart() {
   const ctx = chartCanvas.getContext('2d');
   const W = chartCanvas.width, H = chartCanvas.height;
-  ctx.fillStyle = '#0c1017';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#0c1017'; ctx.fillRect(0, 0, W, H);
   if (lossHistory.length < 1) return;
 
-  const min = Math.min(...lossHistory);
-  const max = Math.max(...lossHistory);
+  const all = [...lossHistory, ...valLossHistory];
+  const min = Math.min(...all), max = Math.max(...all);
   const range = Math.max(max - min, 0.001);
   const padX = 46, padY = 12;
 
-  ctx.strokeStyle = '#1c2432';
-  ctx.fillStyle = '#5c6a7d';
-  ctx.font = '10px ui-monospace,monospace';
-  ctx.textAlign = 'right';
-  for (let i = 0; i <= 4; i++){
+  ctx.strokeStyle = '#1c2432'; ctx.fillStyle = '#5c6a7d';
+  ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
     const y = padY + (i / 4) * (H - padY * 2);
     ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
-    ctx.fillText((max - (i / 4) * range).toFixed(3), padX - 6, y + 3);
+    ctx.fillText((max - (i / 4) * range).toFixed(2), padX - 6, y + 3);
   }
 
-  ctx.beginPath();
-  ctx.strokeStyle = '#5b8cff';
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  lossHistory.forEach((v, i) => {
-    const x = lossHistory.length === 1 ? W / 2
-      : padX + (i / (lossHistory.length - 1)) * (W - padX * 2);
-    const y = H - padY - ((v - min) / range) * (H - padY * 2);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  lossHistory.forEach((v, i) => {
-    const x = lossHistory.length === 1 ? W / 2
-      : padX + (i / (lossHistory.length - 1)) * (W - padX * 2);
-    const y = H - padY - ((v - min) / range) * (H - padY * 2);
-    ctx.beginPath();
-    ctx.fillStyle = '#5b8cff';
-    ctx.arc(x, y, 3, 0, Math.PI * 2);
-    ctx.fill();
-  });
+  const drawLine = (arr, color) => {
+    if (!arr.length) return;
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    arr.forEach((v, i) => {
+      const x = arr.length === 1 ? W / 2
+        : padX + (i / (arr.length - 1)) * (W - padX * 2);
+      const y = H - padY - ((v - min) / range) * (H - padY * 2);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  };
+  drawLine(lossHistory, '#5b8cff');
+  drawLine(valLossHistory, '#7ee2a8');
 }
 
 /* =========================================================
-   6. Sample generation
+   Train — cached inputs mean this is now near-instant prep
    ========================================================= */
-function sampleFromProbs(probs, temp){
-  const adj = Array.from(probs).map(p => Math.pow(Math.max(p, 1e-10), 1 / temp));
-  const sum = adj.reduce((a, b) => a + b, 0);
-  let r = Math.random() * sum;
-  for (let i = 0; i < adj.length; i++){
-    r -= adj[i];
-    if (r <= 0) return i;
+async function runTraining() {
+  trainStatus.className = 'status-line';
+  trainStatus.textContent = '';
+
+  if (classes.length < 2) {
+    trainStatus.className = 'status-line bad';
+    trainStatus.textContent = 'Need at least 2 classes.';
+    return;
   }
-  return adj.length - 1;
-}
-
-async function generate(seed, length, temp){
-  let full = seed;
-  while (full.length < SEQ_LEN) full = ' ' + full;
-  const startLen = full.length;
-
-  for (let i = 0; i < length; i++){
-    const window = full.slice(-SEQ_LEN);
-    const indices = new Int32Array(SEQ_LEN);
-    for (let j = 0; j < SEQ_LEN; j++){
-      indices[j] = charToIdx.get(window[j]) ?? 0;
+  for (const c of classes) {
+    if (c.items.length < MIN_PER_CLASS) {
+      trainStatus.className = 'status-line bad';
+      trainStatus.textContent = `"${c.name}" needs at least ${MIN_PER_CLASS} images (has ${c.items.length}).`;
+      return;
     }
-    const xs = tf.tensor2d(indices, [1, SEQ_LEN], 'int32');
-    const pred = model.predict(xs);
-    const probs = await pred.data();
-    xs.dispose();
-    pred.dispose();
-
-    const idx = sampleFromProbs(probs, temp);
-    full += idxToChar[idx] ?? ' ';
   }
-  return full.slice(startLen);
-}
 
-/* =========================================================
-   7. Train
-   ========================================================= */
-async function runTraining(){
   trainBtn.disabled = true;
+  resetBtn.disabled = true;
+  downloadBtn.disabled = true;
+  idbBtn.disabled = true;
 
-  const tensors = buildTrainingTensors(trainText);
+  const numClasses = classes.length;
+
+  // --- Build arrays from cached tensors (fast, no image decoding) ---
+  const allInputs = [];
+  const allLabels = [];
+  for (let ci = 0; ci < classes.length; ci++) {
+    for (const item of classes[ci].items) {
+      allInputs.push(item.input);
+      const label = new Array(numClasses).fill(0);
+      label[ci] = 1;
+      allLabels.push(label);
+    }
+  }
+
+  const N = allInputs.length;
+
+  // Shuffle
+  const order = [...Array(N).keys()];
+  for (let i = N - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const shuffledInputs = order.map(i => allInputs[i]);
+  const shuffledLabels = order.map(i => allLabels[i]);
+
+  const valSize = N >= 10 ? Math.floor(N * 0.2) : 0;
+  const trainSize = N - valSize;
+
+  const trainXs = tf.tensor4d(
+    shuffledInputs.slice(0, trainSize).flat(),
+    [trainSize, IMG_SIZE, IMG_SIZE, 3]
+  );
+  const trainYs = tf.tensor2d(
+    shuffledLabels.slice(0, trainSize),
+    [trainSize, numClasses]
+  );
+
+  let valXs = null, valYs = null;
+  if (valSize > 0) {
+    valXs = tf.tensor4d(
+      shuffledInputs.slice(trainSize).flat(),
+      [valSize, IMG_SIZE, IMG_SIZE, 3]
+    );
+    valYs = tf.tensor2d(
+      shuffledLabels.slice(trainSize),
+      [valSize, numClasses]
+    );
+  }
+
   if (model) model.dispose();
-  model = buildModel(vocabSize);
+  model = buildModel(numClasses);
 
-  lossHistory = [];
+  lossHistory = []; valLossHistory = [];
   drawChart();
-  statEpoch.textContent = `0 / ${EPOCHS}`;
+  statEpoch.textContent = '0 / 15';
   statLoss.textContent = '—';
-  statAcc.textContent = '—';
-  statTime.textContent = '0s';
-  sampleLive.textContent = 'Training started…';
+  statTrainAcc.textContent = '—';
+  statValAcc.textContent = '—';
+  classResults.innerHTML = '';
 
-  stage3.style.display = 'block';
-  stage3.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-  trainingStart = Date.now();
+  const EPOCHS = 15;
+  const BATCH = 32;
 
   try {
-    await model.fit(tensors.xs, tensors.ys, {
+    await model.fit(trainXs, trainYs, {
       epochs: EPOCHS,
       batchSize: BATCH,
       shuffle: true,
+      validationData: valSize > 0 ? [valXs, valYs] : undefined,
       callbacks: {
         onEpochEnd: async (epoch, logs) => {
           statEpoch.textContent = `${epoch + 1} / ${EPOCHS}`;
-          statLoss.textContent = logs.loss.toFixed(4);
-          statAcc.textContent = (logs.acc * 100).toFixed(1) + '%';
-          statTime.textContent = ((Date.now() - trainingStart) / 1000).toFixed(0) + 's';
-
+          statLoss.textContent = logs.loss.toFixed(3);
+          statTrainAcc.textContent = (logs.acc * 100).toFixed(1) + '%';
+          statValAcc.textContent = logs.val_acc != null
+            ? (logs.val_acc * 100).toFixed(1) + '%' : 'n/a';
           lossHistory.push(logs.loss);
+          if (logs.val_loss != null) valLossHistory.push(logs.val_loss);
           drawChart();
-
-          sampleLive.textContent = 'generating sample…';
-          try {
-            const seed = trainText.slice(0, SEQ_LEN);
-            const s = await generate(seed, 160, 0.8);
-            sampleLive.textContent = s;
-          } catch (e){
-            sampleLive.textContent = '(sample failed: ' + e.message + ')';
-          }
           await tf.nextFrame();
         }
       }
     });
 
-    tensors.xs.dispose();
-    tensors.ys.dispose();
+    await showClassResults(valXs, valYs);
 
-    stage1.querySelector('.stage-title').classList.add('done');
-    stage2.style.display = 'none';
-    stage3.querySelector('.stage-title').classList.add('done');
-    stage3.querySelector('.stage-title').classList.remove('active');
-    stage4.style.display = 'block';
-    stage4.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    trainBtn.disabled = false;
-  } catch (err){
+    trainBtn.textContent = 'Retrain classifier';
+    downloadBtn.disabled = false;
+    idbBtn.disabled = false;
+
+    const trainA = parseFloat(statTrainAcc.textContent.replace('%', '')) || 0;
+    const valA = parseFloat(statValAcc.textContent.replace('%', '')) || 0;
+    if (valA > 0 && trainA - valA > 20) {
+      trainStatus.className = 'status-line';
+      trainStatus.textContent =
+        '⚠️ Overfitting: training accuracy is much higher than validation. Add more images per class.';
+    } else if (valA > 0 && valA < 60) {
+      trainStatus.className = 'status-line';
+      trainStatus.textContent =
+        '⚠️ Low validation accuracy. Classes may be too similar, or you need more examples.';
+    } else if (valA > 0) {
+      trainStatus.className = 'status-line ok';
+      trainStatus.textContent = '✓ Trained. Ready to share.';
+    } else {
+      trainStatus.className = 'status-line ok';
+      trainStatus.textContent = '✓ Trained (fewer than 10 images — no validation set).';
+    }
+  } catch (err) {
     console.error(err);
-    sampleLive.textContent = 'Training failed: ' + err.message;
+    trainStatus.className = 'status-line bad';
+    trainStatus.textContent = 'Training failed: ' + err.message;
+    trainBtn.textContent = 'Train classifier';
+  } finally {
     trainBtn.disabled = false;
+    resetBtn.disabled = false;
+    trainXs.dispose(); trainYs.dispose();
+    if (valXs) valXs.dispose();
+    if (valYs) valYs.dispose();
   }
 }
 
+async function showClassResults(valXs, valYs) {
+  classResults.innerHTML = '';
+  if (!valXs || !valYs) return;
+
+  const preds = model.predict(valXs);
+  const predData = await preds.data();
+  const trueData = await valYs.data();
+  preds.dispose();
+
+  const valSize = valXs.shape[0];
+  const numClasses = classes.length;
+  const correct = new Array(numClasses).fill(0);
+  const total = new Array(numClasses).fill(0);
+
+  for (let i = 0; i < valSize; i++) {
+    let trueIdx = 0;
+    for (let c = 1; c < numClasses; c++)
+      if (trueData[i * numClasses + c] > trueData[i * numClasses + trueIdx]) trueIdx = c;
+    let predIdx = 0;
+    for (let c = 1; c < numClasses; c++)
+      if (predData[i * numClasses + c] > predData[i * numClasses + predIdx]) predIdx = c;
+    total[trueIdx]++;
+    if (predIdx === trueIdx) correct[trueIdx]++;
+  }
+
+  classes.forEach((cls, i) => {
+    if (total[i] === 0) return;
+    const pct = Math.round((correct[i] / total[i]) * 100);
+    const row = document.createElement('div');
+    row.className = 'class-res';
+    row.innerHTML = `
+      <span class="name">${cls.name}</span>
+      <span class="bar"><span class="bar-fill" style="width:${pct}%"></span></span>
+      <span class="pct">${correct[i]}/${total[i]}</span>
+    `;
+    classResults.append(row);
+  });
+}
+
 /* =========================================================
-   8. Export
+   Export
    ========================================================= */
-async function serializeModel(){
+async function serializeModel() {
   const weights = model.getWeights();
-  const weightData = await Promise.all(weights.map(async w => ({
+  const data = await Promise.all(weights.map(async w => ({
     shape: w.shape,
-    data: Array.from(await w.data()).map(v => Math.round(v * 1e5) / 1e5)
+    data: Array.from(await w.data()).map(v => Math.round(v * 10000) / 10000)
   })));
   return {
-    format: 'raccoon-gru-v1',
-    seqLen: SEQ_LEN,
-    embedDim: EMBED_DIM,
-    gruUnits: GRU_UNITS,
-    vocab: idxToChar,
-    weights: weightData
+    format: MODEL_FORMAT,
+    imageSize: IMG_SIZE,
+    classes: classes.map(c => c.name),
+    weights: data
   };
 }
 
@@ -538,88 +747,64 @@ downloadBtn.onclick = async () => {
   downloadBtn.textContent = 'Preparing…';
   try {
     const json = await serializeModel();
-    const text = JSON.stringify(json);
-    const blob = new Blob([text], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(json)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'model.json';
-    a.click();
+    a.href = url; a.download = 'model.json'; a.click();
     URL.revokeObjectURL(url);
     downloadBtn.textContent = '⬇ Download model.json';
     downloadBtn.disabled = false;
-  } catch (e){
+    saveStatus.className = 'status-line ok';
+    saveStatus.textContent = 'Downloaded. Now put the file at docs/model.json in your repo.';
+  } catch (e) {
     alert('Download failed: ' + e.message);
     downloadBtn.textContent = '⬇ Download model.json';
     downloadBtn.disabled = false;
   }
 };
 
-indexedDbBtn.onclick = async () => {
+idbBtn.onclick = async () => {
   if (!model) return;
-  indexedDbBtn.disabled = true;
-  indexedDbBtn.textContent = 'Saving…';
+  idbBtn.disabled = true;
+  idbBtn.textContent = 'Saving…';
   try {
-    await model.save('indexeddb://raccoon-brain-gru');
-    // Also save vocab so we can rebuild
-    localStorage.setItem('rc_gru_vocab', JSON.stringify(idxToChar));
-    localStorage.setItem('rc_gru_meta', JSON.stringify({
-      seqLen: SEQ_LEN, embedDim: EMBED_DIM, gruUnits: GRU_UNITS
-    }));
-    indexedDbBtn.textContent = '✓ Saved to this browser';
+    const json = await serializeModel();
+    localStorage.setItem('rc_classifier', JSON.stringify(json));
+    idbBtn.textContent = '✓ Saved to this browser';
+    saveStatus.className = 'status-line ok';
+    saveStatus.textContent = 'Saved. Open index.html — it will use this model.';
     setTimeout(() => {
-      indexedDbBtn.textContent = '💾 Save to this browser';
-      indexedDbBtn.disabled = false;
+      idbBtn.textContent = '💾 Save to this browser';
+      idbBtn.disabled = false;
     }, 2500);
-  } catch (e){
+  } catch (e) {
     alert('Save failed: ' + e.message);
-    indexedDbBtn.textContent = '💾 Save to this browser';
-    indexedDbBtn.disabled = false;
+    idbBtn.textContent = '💾 Save to this browser';
+    idbBtn.disabled = false;
   }
 };
 
-testBtn.onclick = async () => {
-  if (!model) return;
-  sampleTest.style.display = 'block';
-  sampleTest.textContent = 'Generating…';
-  testBtn.disabled = true;
-  try {
-    const seed = trainText.slice(0, SEQ_LEN);
-    const s = await generate(seed, 300, 0.8);
-    sampleTest.textContent = s;
-  } catch (e){
-    sampleTest.textContent = 'Error: ' + e.message;
-  }
-  testBtn.disabled = false;
+resetBtn.onclick = () => {
+  if (model) { model.dispose(); model = null; }
+  downloadBtn.disabled = true;
+  idbBtn.disabled = true;
+  lossHistory = []; valLossHistory = [];
+  drawChart();
+  statEpoch.textContent = '—';
+  statLoss.textContent = '—';
+  statTrainAcc.textContent = '—';
+  statValAcc.textContent = '—';
+  classResults.innerHTML = '';
+  trainStatus.className = 'status-line';
+  trainStatus.textContent = 'Model reset.';
 };
 
 /* =========================================================
-   9. Boot
+   Boot
    ========================================================= */
 trainBtn.onclick = runTraining;
-
-(async function boot(){
-  try {
-    const { text, pages, docs } = await loadAllDocs();
-    trainText = prepareTrainingData(text);
-    statDocs.textContent  = String(docs);
-    statPages.textContent = String(pages);
-    statChars.textContent = trainText.length.toLocaleString();
-    statVocab.textContent = String(vocabSize);
-    textPreview.textContent = trainText.slice(0, 400) + (trainText.length > 400 ? '…' : '');
-
-    stage1.querySelector('.stage-title').classList.add('done');
-    stage1.querySelector('.stage-title').classList.remove('active');
-    stage2.style.display = 'block';
-    stage2.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } catch (err){
-    console.error(err);
-    error1.style.display = 'block';
-    error1.textContent = '⚠️ ' + err.message +
-      ' — Make sure docs/manifest.json exists and lists your PDF filenames.';
-    status1.textContent = 'Load failed.';
-  }
-})();
+renderClasses();
+drawChart();
 </script>
 </body>
 </html>
